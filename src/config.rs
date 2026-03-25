@@ -17,6 +17,10 @@ pub struct Config {
     /// YouTube playlist URL (used when source = "youtube")
     #[serde(default)]
     pub youtube_url: Option<String>,
+    /// Browser to extract cookies from for YouTube (e.g., "chrome", "firefox").
+    /// Leave empty/None to disable cookie extraction.
+    #[serde(default)]
+    pub youtube_cookies_browser: Option<String>,
 }
 
 fn default_music_dir() -> String {
@@ -36,6 +40,7 @@ impl Default for Config {
             repeat: false,
             shuffle: false,
             youtube_url: None,
+            youtube_cookies_browser: None,
         }
     }
 }

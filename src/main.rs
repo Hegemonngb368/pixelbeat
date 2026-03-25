@@ -121,7 +121,7 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Daemon { play } => {
             let cfg = config::Config::load();
-            let player =
+            let mut player =
                 daemon::player::Player::new().expect("Failed to initialize audio player");
 
             // Apply config defaults
@@ -132,6 +132,8 @@ fn main() -> Result<()> {
             if cfg.shuffle {
                 player.set_shuffle(true);
             }
+
+            player.cookies_browser = cfg.youtube_cookies_browser.clone();
 
             let mut autoplay_radio = None;
 

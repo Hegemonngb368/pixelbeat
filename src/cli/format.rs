@@ -10,6 +10,19 @@ const RESET: &str = "\x1b[0m";
 
 const SPECTRUM_BARS: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
+/// Truncate a string to at most `max_chars` characters, appending "…" if truncated.
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    let mut chars = s.chars();
+    let truncated: String = chars.by_ref().take(max_chars.saturating_sub(1)).collect();
+    if chars.next().is_some() {
+        // String was longer than max_chars
+        format!("{}…", truncated)
+    } else {
+        // String fit within max_chars
+        s.to_string()
+    }
+}
+
 /// Format a duration in seconds to M:SS
 fn format_time(secs: f64) -> String {
     let mins = secs as u64 / 60;
@@ -124,11 +137,7 @@ pub fn render_cassette(state: &PlayerState, width: usize) -> String {
 
     // Truncate title
     let max_title = width.saturating_sub(20);
-    let title = if state.title.len() > max_title && max_title > 2 {
-        format!("{}…", &state.title[..max_title.saturating_sub(1)])
-    } else {
-        state.title.clone()
-    };
+    let title = truncate_chars(&state.title, max_title);
 
     // Mode indicators
     let mut modes = String::new();
@@ -240,11 +249,7 @@ fn expand_token(token: &str, state: &PlayerState) -> String {
             if parts.len() > 1 {
                 let max_str = parts[1].trim_start_matches('.');
                 if let Ok(max) = max_str.parse::<usize>() {
-                    if title.len() > max {
-                        format!("{}{}…{}", ORANGE_BRIGHT, &title[..max.saturating_sub(1)], RESET)
-                    } else {
-                        format!("{}{}{}", ORANGE_BRIGHT, title, RESET)
-                    }
+                    format!("{}{}{}", ORANGE_BRIGHT, truncate_chars(title, max), RESET)
                 } else {
                     format!("{}{}{}", ORANGE_BRIGHT, title, RESET)
                 }

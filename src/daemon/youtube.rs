@@ -41,13 +41,7 @@ pub fn fetch_playlist(url: &str) -> Result<Vec<YtTrack>> {
     eprintln!("pixelbeat: fetching YouTube playlist info...");
 
     let output = Command::new("yt-dlp")
-        .args([
-            "--flat-playlist",
-            "--dump-json",
-            "--no-warnings",
-            "--quiet",
-            url,
-        ])
+        .args(["--flat-playlist", "--dump-json", "--no-warnings", "--quiet", url])
         .output()
         .context("Failed to run yt-dlp")?;
 
@@ -63,8 +57,8 @@ pub fn fetch_playlist(url: &str) -> Result<Vec<YtTrack>> {
         if line.trim().is_empty() {
             continue;
         }
-        let entry: serde_json::Value = serde_json::from_str(line)
-            .with_context(|| "Failed to parse yt-dlp JSON")?;
+        let entry: serde_json::Value =
+            serde_json::from_str(line).with_context(|| "Failed to parse yt-dlp JSON")?;
 
         let video_id = entry.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
         if video_id.is_empty() {
@@ -84,39 +78,43 @@ pub fn fetch_playlist(url: &str) -> Result<Vec<YtTrack>> {
 /// mpv process handle for streaming YouTube audio
 pub struct MpvPlayer {
     process: Option<Child>,
+    /// Persistent IPC connection (reused across queries, ~100x fewer syscalls)
+    conn: Option<UnixStream>,
 }
 
 impl MpvPlayer {
     pub fn new() -> Self {
-        Self { process: None }
+        Self { process: None, conn: None }
     }
 
     /// Start streaming a YouTube URL via mpv (instant playback, no download)
-    pub fn play_url(&mut self, url: &str, volume: f32) -> Result<()> {
+    pub fn play_url(&mut self, url: &str, volume: f32, cookies_browser: Option<&str>) -> Result<()> {
         if !is_mpv_available() {
             anyhow::bail!("mpv is not installed. Install with: brew install mpv");
         }
 
-        // Kill existing mpv process
         self.stop();
-
-        // Clean up stale socket
         std::fs::remove_file(MPV_SOCKET).ok();
 
         let vol = (volume * 100.0) as u32;
-
         eprintln!("pixelbeat: streaming via mpv...");
 
+        let mut args = vec![
+            "--no-video".to_string(),
+            "--ytdl-format=bestaudio".to_string(),
+            format!("--volume={}", vol),
+            "--really-quiet".to_string(),
+            format!("--input-ipc-server={}", MPV_SOCKET),
+        ];
+
+        if let Some(browser) = cookies_browser {
+            args.push(format!("--ytdl-raw-options=cookies-from-browser={}", browser));
+        }
+
+        args.push(url.to_string());
+
         let child = Command::new("mpv")
-            .args([
-                "--no-video",
-                "--ytdl-format=bestaudio",
-                &format!("--volume={}", vol),
-                "--really-quiet",
-                &format!("--input-ipc-server={}", MPV_SOCKET),
-                "--ytdl-raw-options=cookies-from-browser=chrome",
-                url,
-            ])
+            .args(&args)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -124,9 +122,15 @@ impl MpvPlayer {
 
         self.process = Some(child);
 
-        // Wait for IPC socket to appear
+        // Wait for socket, then establish persistent connection
         for _ in 0..30 {
             if std::path::Path::new(MPV_SOCKET).exists() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(MPV_SOCKET, std::fs::Permissions::from_mode(0o700)).ok();
+                }
+                self.connect();
                 return Ok(());
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
@@ -135,99 +139,109 @@ impl MpvPlayer {
         Ok(())
     }
 
-    /// Send a JSON command to mpv via IPC
-    fn send_command(&self, cmd: &serde_json::Value) -> Result<serde_json::Value> {
-        let mut stream = UnixStream::connect(MPV_SOCKET)
-            .context("Cannot connect to mpv IPC socket")?;
-        stream.set_read_timeout(Some(std::time::Duration::from_secs(2))).ok();
+    /// Establish persistent IPC connection to mpv
+    fn connect(&mut self) {
+        if let Ok(stream) = UnixStream::connect(MPV_SOCKET) {
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(1))).ok();
+            stream.set_write_timeout(Some(std::time::Duration::from_secs(1))).ok();
+            self.conn = Some(stream);
+        }
+    }
 
-        let mut cmd_str = serde_json::to_string(cmd)?;
-        cmd_str.push('\n');
-        stream.write_all(cmd_str.as_bytes())?;
-
-        let reader = BufReader::new(&stream);
-        for line in reader.lines() {
-            let line = line?;
-            if line.is_empty() {
-                continue;
+    /// Send a JSON command via persistent connection (reconnects once on failure)
+    fn send_command(&mut self, cmd: &serde_json::Value) -> Result<serde_json::Value> {
+        for attempt in 0..2 {
+            if self.conn.is_none() {
+                self.connect();
             }
-            if let Ok(resp) = serde_json::from_str::<serde_json::Value>(&line) {
-                // Skip event messages, wait for command response
-                if resp.get("error").is_some() {
-                    return Ok(resp);
+
+            let conn = match self.conn.as_ref() {
+                Some(s) => s,
+                None => {
+                    if attempt == 0 { continue; }
+                    anyhow::bail!("No mpv IPC connection");
+                }
+            };
+
+            let read_stream = match conn.try_clone() {
+                Ok(s) => s,
+                Err(_) => { self.conn = None; continue; }
+            };
+
+            let mut cmd_str = serde_json::to_string(cmd)?;
+            cmd_str.push('\n');
+
+            if let Err(_) = conn.try_clone().and_then(|mut s| s.write_all(cmd_str.as_bytes())) {
+                self.conn = None;
+                if attempt == 0 { continue; }
+                anyhow::bail!("Failed to write to mpv IPC");
+            }
+
+            let reader = BufReader::new(read_stream);
+            for line in reader.lines() {
+                match line {
+                    Ok(l) if !l.is_empty() => {
+                        if let Ok(resp) = serde_json::from_str::<serde_json::Value>(&l) {
+                            if resp.get("error").is_some() {
+                                return Ok(resp);
+                            }
+                        }
+                    }
+                    Err(_) => { self.conn = None; break; }
+                    _ => continue,
                 }
             }
+
+            if attempt == 0 { self.conn = None; continue; }
         }
+
         anyhow::bail!("No response from mpv")
     }
 
-    /// Get a property from mpv (time-pos, duration, media-title, pause, etc.)
-    pub fn get_property(&self, prop: &str) -> Option<serde_json::Value> {
+    pub fn get_property(&mut self, prop: &str) -> Option<serde_json::Value> {
         let cmd = serde_json::json!({"command": ["get_property", prop]});
-        self.send_command(&cmd)
-            .ok()
-            .and_then(|r| r.get("data").cloned())
+        self.send_command(&cmd).ok().and_then(|r| r.get("data").cloned())
     }
 
-    /// Set a property on mpv
-    pub fn set_property(&self, prop: &str, value: serde_json::Value) -> Result<()> {
+    pub fn set_property(&mut self, prop: &str, value: serde_json::Value) -> Result<()> {
         let cmd = serde_json::json!({"command": ["set_property", prop, value]});
         self.send_command(&cmd)?;
         Ok(())
     }
 
-    /// Pause mpv
-    pub fn pause(&self) -> Result<()> {
+    pub fn pause(&mut self) -> Result<()> {
         self.set_property("pause", serde_json::json!(true))
     }
 
-    /// Resume mpv
-    pub fn resume(&self) -> Result<()> {
+    pub fn resume(&mut self) -> Result<()> {
         self.set_property("pause", serde_json::json!(false))
     }
 
-    /// Toggle pause
-    pub fn toggle_pause(&self) -> Result<()> {
-        let paused = self.get_property("pause")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+    pub fn toggle_pause(&mut self) -> Result<()> {
+        let paused = self.get_property("pause").and_then(|v| v.as_bool()).unwrap_or(false);
         self.set_property("pause", serde_json::json!(!paused))
     }
 
-    /// Set volume (0.0 - 1.0)
-    pub fn set_volume(&self, vol: f32) -> Result<()> {
+    pub fn set_volume(&mut self, vol: f32) -> Result<()> {
         self.set_property("volume", serde_json::json!((vol * 100.0) as u32))
     }
 
-    /// Get current playback position in seconds
-    pub fn get_position(&self) -> f64 {
-        self.get_property("time-pos")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0)
+    pub fn get_position(&mut self) -> f64 {
+        self.get_property("time-pos").and_then(|v| v.as_f64()).unwrap_or(0.0)
     }
 
-    /// Get total duration in seconds
-    pub fn get_duration(&self) -> f64 {
-        self.get_property("duration")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0)
+    pub fn get_duration(&mut self) -> f64 {
+        self.get_property("duration").and_then(|v| v.as_f64()).unwrap_or(0.0)
     }
 
-    /// Get media title
-    pub fn get_title(&self) -> String {
-        self.get_property("media-title")
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_default()
+    pub fn get_title(&mut self) -> String {
+        self.get_property("media-title").and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default()
     }
 
-    /// Check if mpv is still running
     pub fn is_running(&mut self) -> bool {
         if let Some(ref mut child) = self.process {
             match child.try_wait() {
-                Ok(Some(_)) => {
-                    self.process = None;
-                    false
-                }
+                Ok(Some(_)) => { self.process = None; self.conn = None; false }
                 Ok(None) => true,
                 Err(_) => false,
             }
@@ -236,22 +250,16 @@ impl MpvPlayer {
         }
     }
 
-    /// Check if playback has reached end of file
-    pub fn is_eof(&self) -> bool {
-        self.get_property("eof-reached")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
+    pub fn is_eof(&mut self) -> bool {
+        self.get_property("eof-reached").and_then(|v| v.as_bool()).unwrap_or(false)
     }
 
-    /// Check if mpv is paused
-    pub fn is_paused(&self) -> bool {
-        self.get_property("pause")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
+    pub fn is_paused(&mut self) -> bool {
+        self.get_property("pause").and_then(|v| v.as_bool()).unwrap_or(false)
     }
 
-    /// Stop and kill mpv process
     pub fn stop(&mut self) {
+        self.conn = None;
         if let Some(ref mut child) = self.process {
             child.kill().ok();
             child.wait().ok();

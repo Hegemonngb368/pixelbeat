@@ -8,12 +8,14 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-E3893E.svg)](LICENSE)
 [![macOS](https://img.shields.io/badge/macOS-supported-E3893E?logo=apple&logoColor=white)]()
 
+![pixelbeat in Claude Code](assets/screenshot.png)
+
 ```
-┌ PIXELBEAT ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─┐
-│ ◉ ──────────────●━━━━━━━━━━━━━━ ◎  ▶ 2:47/4:12  │
-│ Sleepy Fish - A Rainy Night in Kyoto  ▅▂█▄▇▁▃▆▂▅ │
-│  ⏮   ⏸   ⏭       🔁  🔀                         │
-└──────────────────────────────────────────────────┘
+┌ PIXELBEAT ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ──┐
+│ ◉ ──────────────●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ○  ▶ 2:47/4:12   │
+│ 🎵 Sleepy Fish - A Rainy Night in Kyoto  ▅▂█▄▇▁▃▆▂▅▃▇              │
+│  ⏮   ⏸   ⏭                                                         │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
 pixelbeat runs as a background daemon and exposes a tiny CLI (`px`) for playback control. It streams YouTube playlists via mpv, plays local audio files through rodio, and ships with built-in chillhop and lofi radio stations. The animated cassette tape UI and spectrum visualizer plug directly into Claude Code's status line, tmux, or starship.
@@ -28,7 +30,7 @@ pixelbeat runs as a background daemon and exposes a tiny CLI (`px`) for playback
 - **Spectrum visualizer** -- 32-bar beat-synced spectrum analyzer with Anthropic orange gradient
 - **TUI mode** -- Full-screen terminal interface built with ratatui
 - **Status bar integration** -- Plug into Claude Code, tmux, or starship with one command
-- **Format template engine** -- Compose your own status line with tokens like `{tape:30}`, `{spectrum:16}`, `{cassette:50}`
+- **Format template engine** -- Compose your own status line with tokens like `{tape:30}`, `{spectrum:16}`, `{cassette:70}`
 - **Shuffle and repeat** -- Persistent mode toggles across sessions via config file
 - **Clickable controls** -- OSC 8 hyperlink buttons (prev/toggle/next/repeat/shuffle) in supported terminals
 

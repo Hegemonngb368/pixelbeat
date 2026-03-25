@@ -58,6 +58,8 @@ pub struct Player {
     yt_track_index: Arc<Mutex<usize>>,
     /// mpv subprocess for YouTube streaming (no download needed)
     mpv: Arc<Mutex<youtube::MpvPlayer>>,
+    /// Browser for YouTube cookie extraction (from config, None = disabled)
+    pub cookies_browser: Option<String>,
 }
 
 impl Player {
@@ -78,6 +80,7 @@ impl Player {
             radio_station: Arc::new(Mutex::new(None)),
             yt_track_index: Arc::new(Mutex::new(0)),
             mpv: Arc::new(Mutex::new(youtube::MpvPlayer::new())),
+            cookies_browser: None,
         })
     }
 
@@ -186,7 +189,7 @@ impl Player {
     pub fn pause(&self) {
         // If mpv is active, control mpv
         if self.is_mpv_active() {
-            let mpv = self.mpv.lock().unwrap();
+            let mut mpv = self.mpv.lock().unwrap();
             mpv.pause().ok();
             let mut state = self.state.lock().unwrap();
             state.playing = false;
@@ -208,7 +211,7 @@ impl Player {
 
     pub fn toggle(&self) -> Result<()> {
         if self.is_mpv_active() {
-            let mpv = self.mpv.lock().unwrap();
+            let mut mpv = self.mpv.lock().unwrap();
             mpv.toggle_pause()?;
             let paused = mpv.is_paused();
             let mut state = self.state.lock().unwrap();
@@ -288,7 +291,7 @@ impl Player {
     pub fn set_volume(&self, vol: f32) {
         let vol = vol.clamp(0.0, 1.0);
         if self.is_mpv_active() {
-            let mpv = self.mpv.lock().unwrap();
+            let mut mpv = self.mpv.lock().unwrap();
             mpv.set_volume(vol).ok();
         }
         if let Some(ref sink) = *self.sink.lock().unwrap() {
@@ -316,7 +319,7 @@ impl Player {
     pub fn tick(&self) -> Result<()> {
         // === mpv mode: sync state from mpv ===
         if self.is_mpv_active() {
-            let mpv = self.mpv.lock().unwrap();
+            let mut mpv = self.mpv.lock().unwrap();
             let pos = mpv.get_position();
             let dur = mpv.get_duration();
 
@@ -544,7 +547,7 @@ impl Player {
         let url = format!("https://www.youtube.com/watch?v={}", yt_track.video_id);
 
         let mut mpv = self.mpv.lock().unwrap();
-        mpv.play_url(&url, volume)?;
+        mpv.play_url(&url, volume, self.cookies_browser.as_deref())?;
 
         // Update state
         let mut state = self.state.lock().unwrap();

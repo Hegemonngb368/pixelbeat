@@ -216,6 +216,13 @@ pub fn start_server(player: Arc<Mutex<Player>>, autoplay_radio: Option<String>) 
     }
 
     let listener = UnixListener::bind(&path).context("Failed to bind Unix socket")?;
+
+    // Restrict socket permissions to owner-only
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).ok();
+    }
     listener
         .set_nonblocking(true)
         .context("Failed to set non-blocking")?;
