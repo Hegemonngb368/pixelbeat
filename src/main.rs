@@ -7,6 +7,8 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::fs;
+use std::io::Write;
 
 #[derive(Parser)]
 #[command(
@@ -229,26 +231,7 @@ fn print_setup(target: &str) {
 
     match target.to_lowercase().as_str() {
         "claude-code" | "claude" | "cc" => {
-            println!(
-                r#"
-{ORANGE}pixelbeat{RESET} — Claude Code Status Line Integration
-{DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{RESET}
-
-Add this to your {ORANGE}~/.claude/statusline.sh{RESET}:
-
-  {DIM}# pixelbeat music player status{RESET}
-  if command -v px &>/dev/null; then
-    PX_STATUS=$(px status --format "♪ {{title:.25}} {{icon}} {{bar:12}} {{elapsed}}/{{duration}}" 2>/dev/null)
-    if [ -n "$PX_STATUS" ]; then
-      echo "$PX_STATUS"
-      echo "$(px status --format "  {{spectrum:32}}" 2>/dev/null)"
-    fi
-  fi
-
-Then start the daemon:
-  {ORANGE}px daemon --play ~/Music{RESET}
-"#
-            );
+            setup_claude_code(ORANGE, DIM, RESET);
         }
         "tmux" => {
             println!(
@@ -285,4 +268,131 @@ Add to your {ORANGE}~/.config/starship.toml{RESET}:
             println!("Unknown target: {}. Available: claude-code, tmux, starship", target);
         }
     }
+}
+
+fn setup_claude_code(orange: &str, dim: &str, reset: &str) {
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => {
+            eprintln!("Could not determine home directory");
+            return;
+        }
+    };
+
+    let claude_dir = home.join(".claude");
+    let statusline_path = claude_dir.join("statusline.sh");
+    let settings_path = claude_dir.join("settings.json");
+
+    println!(
+        "\n{orange}pixelbeat{reset} — Claude Code Setup\n{dim}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{reset}\n"
+    );
+
+    // Ensure ~/.claude/ exists
+    if !claude_dir.exists() {
+        let _ = fs::create_dir_all(&claude_dir);
+    }
+
+    // The pixelbeat snippet to inject
+    let snippet = r#"
+# ── pixelbeat music player ─────────────────────────────
+PX="$HOME/.cargo/bin/px"
+PX_SOCK="${TMPDIR:-/tmp}/pixelbeat.sock"
+if [ -x "$PX" ]; then
+    px_cassette=$("$PX" status --format "{cassette:70}" 2>/dev/null)
+    if [ -n "$px_cassette" ]; then
+        printf "\n%b" "$px_cassette"
+    fi
+fi
+"#;
+
+    let marker = "# ── pixelbeat music player";
+
+    // Handle statusline.sh
+    if statusline_path.exists() {
+        let content = fs::read_to_string(&statusline_path).unwrap_or_default();
+        if content.contains(marker) {
+            println!("  {dim}✓{reset} statusline.sh already has pixelbeat integration");
+        } else {
+            // Append before the last `exit 0` if present, otherwise append at end
+            let new_content = if let Some(pos) = content.rfind("\nexit 0") {
+                let (before, after) = content.split_at(pos);
+                format!("{}{}{}", before, snippet, after)
+            } else {
+                format!("{}{}", content, snippet)
+            };
+            fs::write(&statusline_path, new_content).unwrap_or_else(|e| {
+                eprintln!("  Failed to write statusline.sh: {}", e);
+            });
+            println!("  {orange}✓{reset} Added pixelbeat to statusline.sh");
+        }
+    } else {
+        // Create a minimal statusline.sh
+        let content = format!(
+            r#"#!/bin/bash
+set -f
+
+input=$(cat)
+
+if [ -z "$input" ]; then
+    printf "Claude"
+    exit 0
+fi
+{snippet}
+exit 0
+"#
+        );
+        fs::write(&statusline_path, &content).unwrap_or_else(|e| {
+            eprintln!("  Failed to create statusline.sh: {}", e);
+        });
+
+        // Make executable
+        #[cfg(unix)]
+        {{
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&statusline_path, fs::Permissions::from_mode(0o755));
+        }}
+
+        println!("  {orange}✓{reset} Created statusline.sh with pixelbeat integration");
+    }
+
+    // Handle settings.json — ensure statusLine command is configured
+    let statusline_cmd = r#"bash "$HOME/.claude/statusline.sh""#;
+    if settings_path.exists() {
+        let content = fs::read_to_string(&settings_path).unwrap_or_default();
+        if content.contains("statusLine") || content.contains("statusline") {
+            println!("  {dim}✓{reset} settings.json already has statusLine configured");
+        } else {
+            // Parse and add statusLine
+            if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&content) {
+                json["statusLine"] = serde_json::json!({
+                    "type": "command",
+                    "command": statusline_cmd
+                });
+                if let Ok(pretty) = serde_json::to_string_pretty(&json) {
+                    fs::write(&settings_path, pretty).unwrap_or_else(|e| {
+                        eprintln!("  Failed to write settings.json: {}", e);
+                    });
+                    println!("  {orange}✓{reset} Added statusLine config to settings.json");
+                }
+            }
+        }
+    } else {
+        let settings = serde_json::json!({
+            "statusLine": {
+                "type": "command",
+                "command": statusline_cmd
+            }
+        });
+        if let Ok(pretty) = serde_json::to_string_pretty(&settings) {
+            fs::write(&settings_path, pretty).unwrap_or_else(|e| {
+                eprintln!("  Failed to create settings.json: {}", e);
+            });
+            println!("  {orange}✓{reset} Created settings.json with statusLine config");
+        }
+    }
+
+    println!("\n  {orange}Done!{reset} Now start the daemon:\n");
+    println!("    px daemon &");
+    println!("    px radio lofi\n");
+    println!("  Restart Claude Code to see pixelbeat in the status line.\n");
 }
