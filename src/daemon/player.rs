@@ -55,8 +55,9 @@ pub struct Player {
     pause_elapsed: Arc<Mutex<Duration>>,
     is_paused: Arc<AtomicBool>,
     radio_station: Arc<Mutex<Option<RadioStation>>>,
-    /// Current track index within a YouTube playlist (for sequential playback)
     yt_track_index: Arc<Mutex<usize>>,
+    /// mpv subprocess for YouTube streaming (no download needed)
+    mpv: Arc<Mutex<youtube::MpvPlayer>>,
 }
 
 impl Player {
@@ -76,6 +77,7 @@ impl Player {
             is_paused: Arc::new(AtomicBool::new(false)),
             radio_station: Arc::new(Mutex::new(None)),
             yt_track_index: Arc::new(Mutex::new(0)),
+            mpv: Arc::new(Mutex::new(youtube::MpvPlayer::new())),
         })
     }
 
@@ -182,9 +184,16 @@ impl Player {
     }
 
     pub fn pause(&self) {
+        // If mpv is active, control mpv
+        if self.is_mpv_active() {
+            let mpv = self.mpv.lock().unwrap();
+            mpv.pause().ok();
+            let mut state = self.state.lock().unwrap();
+            state.playing = false;
+            return;
+        }
         if let Some(ref sink) = *self.sink.lock().unwrap() {
             if !self.is_paused.load(Ordering::Relaxed) {
-                // Save elapsed time before pausing
                 if let Some(start) = *self.track_start.lock().unwrap() {
                     let mut elapsed = self.pause_elapsed.lock().unwrap();
                     *elapsed += start.elapsed();
@@ -198,6 +207,14 @@ impl Player {
     }
 
     pub fn toggle(&self) -> Result<()> {
+        if self.is_mpv_active() {
+            let mpv = self.mpv.lock().unwrap();
+            mpv.toggle_pause()?;
+            let paused = mpv.is_paused();
+            let mut state = self.state.lock().unwrap();
+            state.playing = !paused;
+            return Ok(());
+        }
         if self.is_paused.load(Ordering::Relaxed) {
             self.play()
         } else if self.state.lock().unwrap().playing {
@@ -208,7 +225,18 @@ impl Player {
         }
     }
 
+    /// Check if mpv is the active player
+    fn is_mpv_active(&self) -> bool {
+        let mut mpv = self.mpv.lock().unwrap();
+        mpv.is_running()
+    }
+
     pub fn stop(&self) {
+        // Stop mpv if running
+        let mut mpv = self.mpv.lock().unwrap();
+        mpv.stop();
+        drop(mpv);
+
         if let Some(ref sink) = *self.sink.lock().unwrap() {
             sink.stop();
         }
@@ -259,6 +287,10 @@ impl Player {
 
     pub fn set_volume(&self, vol: f32) {
         let vol = vol.clamp(0.0, 1.0);
+        if self.is_mpv_active() {
+            let mpv = self.mpv.lock().unwrap();
+            mpv.set_volume(vol).ok();
+        }
         if let Some(ref sink) = *self.sink.lock().unwrap() {
             sink.set_volume(vol);
         }
@@ -282,6 +314,39 @@ impl Player {
 
     /// Update position and check if track ended
     pub fn tick(&self) -> Result<()> {
+        // === mpv mode: sync state from mpv ===
+        if self.is_mpv_active() {
+            let mpv = self.mpv.lock().unwrap();
+            let pos = mpv.get_position();
+            let dur = mpv.get_duration();
+
+            let mut state = self.state.lock().unwrap();
+            if pos > 0.0 {
+                state.position = pos;
+            }
+            if dur > 0.0 {
+                state.duration = dur;
+            }
+            state.playing = !mpv.is_paused();
+
+            // Check if track ended
+            drop(state);
+            drop(mpv);
+
+            let eof = {
+                let mut mpv = self.mpv.lock().unwrap();
+                mpv.is_eof() || !mpv.is_running()
+            };
+
+            if eof && self.is_radio_mode() {
+                self.play_next_radio_track().ok();
+            }
+
+            self.update_spectrum();
+            return Ok(());
+        }
+
+        // === rodio mode ===
         let empty = {
             let sink = self.sink.lock().unwrap();
             sink.as_ref().map(|s| s.empty()).unwrap_or(true)
@@ -289,15 +354,12 @@ impl Player {
 
         if empty && self.state.lock().unwrap().playing {
             if self.is_radio_mode() {
-                // Radio mode: download and play next random track
                 if let Err(e) = self.play_next_radio_track() {
                     eprintln!("pixelbeat: radio error: {}, retrying...", e);
-                    // Retry once on failure
                     std::thread::sleep(Duration::from_secs(1));
                     self.play_next_radio_track().ok();
                 }
             } else {
-                // Local mode: advance playlist
                 let has_next = {
                     let mut playlist = self.playlist.lock().unwrap();
                     playlist.next();
@@ -317,7 +379,7 @@ impl Player {
             }
         }
 
-        // Update position
+        // Update position from timer
         if self.state.lock().unwrap().playing {
             if let Some(start) = *self.track_start.lock().unwrap() {
                 let pause_elapsed = *self.pause_elapsed.lock().unwrap();
@@ -327,9 +389,7 @@ impl Player {
             }
         }
 
-        // Generate fake spectrum for now (based on playback state)
         self.update_spectrum();
-
         Ok(())
     }
 
@@ -469,49 +529,36 @@ impl Player {
         let yt_track =
             yt_track.ok_or_else(|| anyhow::anyhow!("No YouTube tracks available"))?;
 
-        // Update state to show loading
-        {
-            let mut state = self.state.lock().unwrap();
-            state.title = format!("loading: {}...", yt_track.title);
-        }
-
         let track_count = match &station.source {
             radio::RadioSource::YouTube { tracks, .. } => tracks.len(),
             _ => 0,
         };
 
-        let max_retries = 3;
-        let mut last_err = anyhow::anyhow!("Failed to download YouTube track");
-
-        for attempt in 0..max_retries {
-            eprintln!(
-                "pixelbeat: resolving YouTube track '{}' (attempt {}/{})...",
-                yt_track.title,
-                attempt + 1,
-                max_retries
-            );
-
-            match youtube::download_audio(
-                &yt_track.video_id,
-                &yt_track.title,
-                yt_track.duration,
-            ) {
-                Ok((bytes, title, duration)) => {
-                    return self.play_radio_bytes(
-                        bytes,
-                        &title,
-                        Some((duration, track_count)),
-                    );
-                }
-                Err(e) => {
-                    eprintln!("pixelbeat: YouTube track failed: {}, retrying...", e);
-                    last_err = e;
-                    continue;
-                }
-            }
+        // Stop rodio playback (we're switching to mpv)
+        if let Some(ref sink) = *self.sink.lock().unwrap() {
+            sink.stop();
         }
 
-        Err(last_err.context("Failed to download YouTube track after retries"))
+        // Stream via mpv — instant playback, no download
+        let volume = self.state.lock().unwrap().volume;
+        let url = format!("https://www.youtube.com/watch?v={}", yt_track.video_id);
+
+        let mut mpv = self.mpv.lock().unwrap();
+        mpv.play_url(&url, volume)?;
+
+        // Update state
+        let mut state = self.state.lock().unwrap();
+        state.playing = true;
+        state.title = format!("📻 {}", yt_track.title);
+        state.duration = yt_track.duration;
+        state.position = 0.0;
+        state.track_count = track_count;
+
+        *self.track_start.lock().unwrap() = Some(Instant::now());
+        self.is_paused.store(false, Ordering::Relaxed);
+
+        eprintln!("pixelbeat: streaming: {} ({:.0}s)", yt_track.title, yt_track.duration);
+        Ok(())
     }
 
     /// Play audio from in-memory bytes (used by both TrackList and YouTube radio).
