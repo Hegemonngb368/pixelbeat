@@ -114,7 +114,7 @@ impl MpvPlayer {
                 &format!("--volume={}", vol),
                 "--really-quiet",
                 &format!("--input-ipc-server={}", MPV_SOCKET),
-                "--cookies-from-browser=chrome",
+                "--ytdl-raw-options=cookies-from-browser=chrome",
                 url,
             ])
             .stdout(Stdio::null())
